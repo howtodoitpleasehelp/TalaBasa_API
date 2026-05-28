@@ -1,9 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
 
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+# ---------------------------
+# App setup
+# ---------------------------
 app = FastAPI()
 
 app.add_middleware(
@@ -14,29 +18,69 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------
+# Model setup
+# ---------------------------
 model_name = "smacale/talabasa_war-eng_v2"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# MEMORY-OPTIMIZED LOADING (CRITICAL FOR RENDER)
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.float16,        # reduces memory usage
+    low_cpu_mem_usage=True            # prevents RAM spikes
+)
+
+# FORCE CPU (safer for Render free tier)
+device = torch.device("cpu")
 model = model.to(device)
 model.eval()
 
-class Request(BaseModel):
+# ---------------------------
+# Request schema
+# ---------------------------
+class TranslateRequest(BaseModel):
     text: str
 
+# ---------------------------
+# API endpoint
+# ---------------------------
 @app.post("/translate")
-def translate(req: Request):
+def translate(req: TranslateRequest):
 
-    if not req.text.strip():
-        return {"error": "Empty input"}
+    if not req.text or not req.text.strip():
+        return {"error": "Empty input text"}
 
-    inputs = tokenizer(req.text, return_tensors="pt").to(device)
+    # Tokenize input
+    inputs = tokenizer(
+        req.text,
+        return_tensors="pt",
+        truncation=True
+    ).to(device)
 
+    # Inference (optimized for low memory)
     with torch.no_grad():
-        outputs = model.generate(**inputs)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=64,   # prevents memory explosion
+            num_beams=2          # lighter decoding
+        )
 
-    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Decode output
+    translation = tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True
+    )
 
-    return {"translation": result}
+    return {
+        "input": req.text,
+        "translation": translation
+    }
+
+# ---------------------------
+# Health check endpoint
+# ---------------------------
+@app.get("/")
+def home():
+    return {"status": "TalaBasa API is running"}
